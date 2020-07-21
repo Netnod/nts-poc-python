@@ -62,8 +62,12 @@ class AES_SIV:
             nonce_len = len(nonce)
         plaintext_ptr = _ffi.cast("unsigned char const*", _ffi.from_buffer(plaintext))
         plaintext_len = len(plaintext)
-        ad_ptr = _ffi.cast("unsigned char const*", _ffi.from_buffer(ad))
-        ad_len = len(ad)
+        if ad is None:
+            ad_ptr = _ffi.NULL
+            ad_len = 0
+        else:
+            ad_ptr = _ffi.cast("unsigned char const*", _ffi.from_buffer(ad))
+            ad_len = len(ad)
 
         out = bytearray(plaintext_len + 16)
         out_ptr = _ffi.cast("unsigned char*",  _ffi.from_buffer(out))
@@ -96,8 +100,12 @@ class AES_SIV:
             nonce_len = len(nonce)
         ciphertext_ptr = _ffi.cast("unsigned char const*", _ffi.from_buffer(ciphertext))
         ciphertext_len = len(ciphertext)
-        ad_ptr = _ffi.cast("unsigned char const*", _ffi.from_buffer(ad))
-        ad_len = len(ad)
+        if ad is None:
+            ad_ptr = _ffi.NULL
+            ad_len = 0
+        else:
+            ad_ptr = _ffi.cast("unsigned char const*", _ffi.from_buffer(ad))
+            ad_len = len(ad)
 
         out = bytearray(ciphertext_len - 16)
         out_ptr = _ffi.cast("unsigned char*", _ffi.from_buffer(out))
