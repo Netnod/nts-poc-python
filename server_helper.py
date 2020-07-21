@@ -6,6 +6,8 @@ import os
 import stat
 import binascii
 import struct
+from threading import  Timer
+
 try:
     import configparser
 except ImportError:
@@ -40,8 +42,12 @@ the keys every time the keys are used.
 
 """
 
+KEY_ID_LEN = 4
+KEY_LEN = 32
+
 CONFIG_DEFAULTS = '''
 [ntske]
+syslog =
 port = 443
 
 [ntpv4]
@@ -51,6 +57,10 @@ port = 123
 [keys]
 key_label =
 master_keys_dir = master_keys
+
+[mgmt]
+host =
+port =
 '''
 
 class ServerHelper(object):
@@ -66,9 +76,8 @@ class ServerHelper(object):
             import sys
             config.write(sys.stdout)
 
-
+        self.syslog            = config.get('ntske', 'syslog')
         self.ntske_port        = config.get('ntske', 'port')
-        self.ntske_root_ca     = config.get('ntske', 'root_ca')
         self.ntske_server_cert = config.get('ntske', 'server_cert')
         self.ntske_server_key  = config.get('ntske', 'server_key')
 
@@ -93,39 +102,61 @@ class ServerHelper(object):
         if not os.path.isdir(self.master_keys_dir):
             os.makedirs(self.master_keys_dir)
 
-        self.refresh_master_keys()
-        if not self._master_keys:
-            self.add_master_key()
+        self.mgmt_host         = config.get('mgmt', 'host')
+        self.mgmt_port         = config.get('mgmt', 'port')
+        if self.mgmt_port:
+            self.mgmt_port = int(self.mgmt_port)
+        else:
+            self.mgmt_port = None
 
     def add_master_key(self):
         while 1:
-            keyid = struct.unpack('>H', os.urandom(2))
-            path = os.path.join(self.master_keys_dir, '%04x.key' % keyid)
+            keyid = os.urandom(KEY_ID_LEN)
+            path = os.path.join(self.master_keys_dir, '%s.key' %
+                                binascii.hexlify(keyid).decode('ascii'))
 
             # We could actually get a keyid collision, retry if that happens
             if not os.path.exists(path):
                 break
 
-        key = os.urandom(32)
+        key = os.urandom(KEY_LEN)
 
         with open(path + '+', 'w') as f:
             f.write('%s\n' % binascii.hexlify(key).decode('ascii'))
         os.rename(path + '+', path)
 
-        self.refresh_master_keys()
+        return key
 
     def refresh_master_keys(self):
+        try:
+            self.load_master_keys()
+        except Exception:
+            traceback.print_exc()
+        finally:
+            t = Timer(60, self.refresh_master_keys)
+            t.daemon = True
+            t.start()
+
+    def load_master_keys(self):
         a = []
         for fn in os.listdir(self.master_keys_dir):
             if fn.endswith('.key'):
-                keyid = int(fn[:-4], 16)
+                if len(fn) == 8:
+                    keyid = binascii.unhexlify(fn[:-4])
+                else:
+                    keyid = struct.pack('>L', int(fn[:-4], 16))
                 path = os.path.join(self.master_keys_dir, fn)
                 st = os.stat(path)
                 a.append((st[stat.ST_MTIME], keyid, path))
 
+        a.sort()
+
         # Delete all but the last three keys
         while len(a) > self.MAX_MASTER_KEYS:
-            os.unlink(a[0][2])
+            try:
+                os.unlink(a[0][2])
+            except IOError:
+                pass
             del a[0]
 
         keys = []
@@ -134,13 +165,18 @@ class ServerHelper(object):
             keys.append((keyid, keyvalue))
 
         if 1:
-            print("master keys [ %s ]" % ', '.join(
-                [ str("0x%04x (%u)" % (k,k)) for k, v in keys ]))
+            print("pid %u master keys [ %s ]" % (
+                os.getpid(),
+                ', '.join(
+                    [ str("%s" % (
+                        binascii.hexlify(k))) for k, v in keys ])))
+
+        if not keys:
+            keys.append(self.add_master_key())
 
         self._master_keys = keys
 
     def get_master_keys(self):
-        self.refresh_master_keys()
         return self._master_keys
 
     def get_master_key(self):

@@ -56,7 +56,7 @@ Check out Daniel Fox Franke's libaes_siv implementation and build it:
 
 To start the NTSKE server, open a terminal and run:
 
- python3 ntske-server.py
+ python3 ntske_server.py
 
 The server uses server.ini for its configuration.  The default is for
 the NTSKE server to listen on TCP port 4446.  The master keys are
@@ -65,7 +65,7 @@ NTSKE server will create a new master key.
 
 To start the NTP/UDP server, open a terminal and run:
 
- python3 nts-server.py
+ python3 ntsts_server.py
 
 The server uses the file "server.ini" for its configuration.  The
 default is for the NTSKE server to listen on TCP port 4123.
@@ -73,24 +73,24 @@ default is for the NTSKE server to listen on TCP port 4123.
 Run the NTSKE client to talk to the NTSKE server and save the results
 to the file "client.ini" and not perform certicate verification (-v).
 
- python3 ntske-client.py -v localhost 4446
+ python3 ntske_client.py -v localhost 4446
 
 Run the NTS client to talk to the NTS server and get a timestamped
 packet back.
 
- python3 nts-client.py
+ python3 ntsts_client_.py
 
 If you want to talk to a different NTS server than the one specified
 in client.ini you can specify the NTS server on the command line:
 
- python nts-client.py host port
+ python ntsts_client_.py host port
 
 If you want to rotate the master key, run server_helper.py:
 
  python3 server_helper.py
 
 This will create a new key in the master_keys directory which will be
-read by ntske-server.py or nts-server.py on the next request.
+read by ntske_server.py or ntsts_server.py on the next request.
 
 Testing with Martin Langer's NTS implementation
 ===============================================
@@ -165,17 +165,17 @@ UDP port 4123 for NTS.
 
 To ask for cookies from Martin's NTSKE server, run:
 
- python3 ntske-client.py localhost 4443 rootCaBundle.pem
+ python3 ntske_client.py localhost 4443 rootCaBundle.pem
 
 since Martin's implementation does not send a NTPv4 Port Negotiation
 record, port 123 will be stored in "client.ini", so to talk to
 Martin's NTPv4 server, run the following command:
 
- ./nts-client.py localhost 4123
+ ./ntsts_client_.py localhost 4123
 
-if you are running nts-server.py, you can talk to it using:
+if you are running ntsts_server.py, you can talk to it using:
 
- ./nts-client.py localhost 4126
+ ./ntsts_client_.py localhost 4126
 
 You can also talk to the Python NTSKE server as described above and
 those cookies will also work with with both server implementations.

@@ -7,7 +7,7 @@ Security](https://github.com/dfoxfranke/nts) for the IETF 101
 hackathon and are Public domain:
 
 - aes_siv.py
-- ntske_client.py (renamed to ntske-client.py)
+- ntske_client.py
 - ntske_record.py
 - rfc5705.py
 - rfc7822.py

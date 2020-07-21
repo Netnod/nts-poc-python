@@ -62,6 +62,7 @@ def handle(req, master_key):
 
 def main():
     serverhelper = ServerHelper()
+    serverhelper.refresh_master_keys()
 
     if serverhelper.ntpv4_server:
         host = serverhelper.ntpv4_server.strip()
@@ -72,6 +73,9 @@ def main():
         port = int(serverhelper.ntpv4_port)
     else:
         port = NTPV4_DEFAULT_PORT
+
+    if len(sys.argv) > 1:
+        port = int(sys.argv[1])
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((host, port))
@@ -108,6 +112,7 @@ def main():
             break
         except Exception:
             traceback.print_exc()
+            open("dump/dump-%s-%.3f.bin" % (addr[0], time.time()), 'wb').write(data)
 
         print()
 

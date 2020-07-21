@@ -3,6 +3,7 @@ from __future__ import absolute_import
 from __future__ import division, print_function, unicode_literals
 
 from ntp import *
+from util import hexlify
 
 import os
 import aes_siv
@@ -19,37 +20,71 @@ or maybe it should be an enum
 """
 
 class NTSCookie(object):
-    HEADER_FMT = '>H'
-    HEADER_LEN = struct.calcsize(HEADER_FMT)
     NONCE_LEN = 16
     KEY_LEN = 32
 
-    PLAINTEXT_FMT = '>H32s32s'
-    PLAINTEXT_LEN = struct.calcsize(PLAINTEXT_FMT)
+    AEAD_FMT = '>H'
+    AEAD_LEN = struct.calcsize(AEAD_FMT)
 
     AEAD_EXTRA_LEN = 16
-    CIPHERTEXT_LEN = PLAINTEXT_LEN + AEAD_EXTRA_LEN
-    COOKIE_LEN = HEADER_LEN + NONCE_LEN + CIPHERTEXT_LEN
 
     def __init__(self):
         self.aead = aes_siv.AES_SIV()
+        self.debug = 0
 
     def unpack(self, keys, cookie):
-        if len(cookie) != self.COOKIE_LEN:
-            raise ValueError("invalid cookie length")
+        if keys.get(cookie[:4]):
+            print("chrony cookie")
+            # Chrony compatible cookies
+            # cookie = cookie[:100]
+            keyid_len = 4
+            aead_algo = 15
+            adata = None
+        else:
+            print("mlanger cookie")
+            keyid_len = 2
+            aead_algo = None
+            adata = b''
 
-        keyid = struct.unpack_from(self.HEADER_FMT, cookie, 0)[0]
+        offset = 0
+
+        keyid = cookie[offset : offset + keyid_len]
+        offset += keyid_len
+
+        nonce = cookie[offset : offset + self.NONCE_LEN]
+        offset += self.NONCE_LEN
+
+        ciphertext = cookie[offset:]
 
         key = keys[keyid]
 
-        nonce = cookie[self.HEADER_LEN : self.HEADER_LEN + self.NONCE_LEN]
-        ciphertext = cookie[self.HEADER_LEN + self.NONCE_LEN:]
+        if self.debug:
+            print("master_key %u %s" % (len(key), binascii.hexlify(key)))
 
-        plaintext = self.aead.decrypt(key, nonce, ciphertext, b'')
+        if self.debug:
+            print("nonce      %u %s" % (len(nonce), binascii.hexlify(nonce)))
+            print("ciphertext %u %s" % (len(ciphertext), binascii.hexlify(ciphertext)))
 
-        aead_algo, s2c_key, c2s_key = struct.unpack(self.PLAINTEXT_FMT, plaintext)
+        plaintext = self.aead.decrypt(key, nonce, ciphertext, adata)
 
-        if 0:
+        assert plaintext
+
+        if aead_algo is None:
+            print("mlanger decrypt")
+
+            aead_algo, = struct.unpack(self.AEAD_FMT, plaintext[:self.AEAD_LEN])
+            plaintext = plaintext[self.AEAD_LEN:]
+
+            s2c_key = plaintext[:self.KEY_LEN]
+            c2s_key = plaintext[self.KEY_LEN:]
+
+        else:
+            print("chrony decrypt")
+
+            c2s_key = plaintext[:self.KEY_LEN]
+            s2c_key = plaintext[self.KEY_LEN:]
+
+        if self.debug:
             print("aead_algo  %u" % (aead_algo))
             print("s2c_key    %u %s" % (len(s2c_key), binascii.hexlify(s2c_key)))
             print("c2s_key    %u %s" % (len(c2s_key), binascii.hexlify(c2s_key)))
@@ -57,7 +92,7 @@ class NTSCookie(object):
         return keyid, aead_algo, s2c_key, c2s_key
 
     def pack(self, keyid, key, aead_algo, s2c_key, c2s_key):
-        header = struct.pack(self.HEADER_FMT, keyid)
+        header = keyid
 
         if 0:
             print("aead_algo  %u" % (aead_algo))
@@ -66,9 +101,23 @@ class NTSCookie(object):
 
         nonce = os.urandom(self.NONCE_LEN)
 
-        plaintext = struct.pack(self.PLAINTEXT_FMT, aead_algo, s2c_key, c2s_key)
+        plaintext = bytes()
 
-        ciphertext = bytes(self.aead.encrypt(key, nonce, plaintext, b''))
+        if len(keyid) == 4:
+            plaintext += c2s_key
+            plaintext += s2c_key
+
+            adata = None
+
+        else:
+            plaintext += struct.pack(self.AEAD_FMT, aead_algo)
+
+            plaintext += s2c_key
+            plaintext += c2s_key
+
+            adata = b''
+
+        ciphertext = bytes(self.aead.encrypt(key, nonce, plaintext, adata))
 
         cookie = header + nonce + ciphertext
 
@@ -118,7 +167,7 @@ class NTSPacketHelper(NTPPacket):
 
         adddata = buf[:offset]
 
-        if 1:
+        if self.debug:
             print("field %u %s" % (len(field.value), binascii.hexlify(field.value[:16])))
             print("key   %u %s" % (len(self.unpack_key), binascii.hexlify(self.unpack_key)))
             print("nonce %u %s" % (len(nonce), binascii.hexlify(nonce)))
@@ -167,7 +216,7 @@ class NTSPacketHelper(NTPPacket):
 
     def handle_field(self, field, buf, offset):
         if field.field_type == NTPExtensionFieldType.Unique_Identifier:
-            if self.unique_identifier is not None:
+            if 0 and self.unique_identifier is not None:
                 raise ValueError("multiple unique identifier fields are not allowed")
             self.unique_identifier = field.value
             self.ext.append(field)
@@ -192,6 +241,13 @@ class NTSPacketHelper(NTPPacket):
 
             if 0:
                 print("cipher %u %s" % (len(ciphertext), binascii.hexlify(ciphertext)))
+
+            if self.debug:
+                print("key        = unhexlify('''%s''')" % (hexlify(self.pack_key)))
+                print("nonce      = unhexlify('''%s''')" % hexlify(nonce))
+                print("ad         = unhexlify('''%s''')" % hexlify(buf[:10]))
+                print("ciphertext = unhexlify('''%s''')" % hexlify(ciphertext[:10]))
+                print("plaintext  = unhexlify('''%s''')" % hexlify(plaintext[:10]))
 
             # TODO maybe I should allow odd sized nonces and ciphertext
             if len(nonce) % 4 != 0:

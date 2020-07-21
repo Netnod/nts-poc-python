@@ -4,9 +4,11 @@ from __future__ import division, print_function, unicode_literals
 import os
 import sys
 import socket
+import traceback
 import binascii
 import struct
-import traceback
+import syslog
+import signal
 from socketserver import ThreadingTCPServer, TCPServer, BaseRequestHandler
 
 from pooling import ThreadPoolTCPServer
@@ -15,6 +17,19 @@ from constants import *
 from ntske_record import *
 from nts import NTSCookie
 from server_helper import ServerHelper
+from util import hexlify
+from threading import Timer
+
+import logging
+
+root = logging.getLogger()
+root.setLevel(logging.DEBUG)
+
+handler = logging.StreamHandler(sys.stderr)
+handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+root.addHandler(handler)
 
 assert sys.version_info[0] == 3
 
@@ -43,10 +58,40 @@ def pack_array(a):
 
 class NTSKEHandler(BaseRequestHandler):
     def handle(self):
+        self.info = { 
+            'site' : self.server.syslog,
+            'client_addr' : self.client_address[0],
+            'client_port' : self.client_address[1],
+        }
+
+        try:
+            status = self.handle2()
+            if not isinstance(status, ''.__class__) or (
+                    status != 'success' and not status.startswith('invalid')):
+                status = 'invalid'
+        except:
+            status = 'exception'
+            raise
+        finally:
+            self.info['status'] = status
+            info = ' '.join([ '%s=%s' % (k,v) 
+                              for k,v in sorted(self.info.items()) ])
+            print(info)
+            if self.server.syslog:
+                syslog.syslog(syslog.LOG_INFO | syslog.LOG_USER, info)
+
+    def handle2(self):
         print("Handle", self.client_address, "in child", os.getpid())
 
         self.keyid, self.key = self.server.helper.get_master_key()
         s = self.server.wrapper.accept(self.request)
+        if not s:
+            return 'invalid_tls_failure'
+
+        self.info.update(s.info())
+
+        print("keyid = unhexlify('''%s''')" % hexlify(self.keyid))
+        print("master_key = unhexlify('''%s''')" % hexlify(self.key))
 
         self.npn_protocols = None
         self.aead_algorithms = None
@@ -62,11 +107,11 @@ class NTSKEHandler(BaseRequestHandler):
         while True:
             resp = s.recv(4)
             if resp is None:
-                print("unexpected EOF")
+                return 'invalid_premature_eof'
                 return 1
             if (len(resp) < 4):
-                print("Premature end of server response", file = sys.stderr)
-                return 1
+                print("Premature end of client request", file = sys.stderr)
+                return 'invalid_short_field'
             body_len = struct.unpack(">H", resp[2:4])[0]
             if body_len > 0:
                 resp += s.recv(body_len)
@@ -83,6 +128,8 @@ class NTSKEHandler(BaseRequestHandler):
         s.sendall(b''.join(map(bytes, response)))
 
         s.shutdown()
+
+        return 'success'
 
     def error(self, code, message):
         print("error %u: %s" % (code, message), file = sys.stderr)
@@ -205,8 +252,8 @@ class NTSKEHandler(BaseRequestHandler):
             records.append(Record.make(True, RT_END_OF_MESSAGE))
             return records
 
-        print("C2S: " + binascii.hexlify(c2s_key).decode('utf-8'))
-        print("S2C: " + binascii.hexlify(s2c_key).decode('utf-8'))
+        print("c2s_key = unhexlify('''%s''')" % hexlify(c2s_key))
+        print("s2c_key = unhexlify('''%s''')" % hexlify(s2c_key))
 
         protocol = protocols[0]
         aead_algo = algorithms[0]
@@ -254,12 +301,55 @@ class NTSKEServer(ChosenTCPServer):
         self.ntpv4_server = self.helper.ntpv4_server
         self.ntpv4_port = self.helper.ntpv4_port
         self.key_label = self.helper.key_label
+        self.syslog = self.helper.syslog
 
-        self.wrapper = SSLWrapper()
-        self.wrapper.server(self.helper.ntske_root_ca,
-                            self.helper.ntske_server_cert,
-                            self.helper.ntske_server_key)
-        self.wrapper.set_alpn_protocols([NTS_ALPN_PROTO])
+        if self.syslog:
+            syslog.openlog('ntske-server')
+
+    def serve_forever(self):
+        self.refresh_wrapper()
+        return super().serve_forever()
+
+    def sighup(self, signalnumber, frame):
+        print("pid %u received SIGHUP, refreshing" % os.getpid())
+        self.refresh()
+
+    def refresh_wrapper(self):
+        self.refresh()
+
+        t = Timer(60, self.refresh_wrapper)
+        t.daemon = True
+        t.start()
+
+    def refresh(self):
+        try:
+            wrapper = SSLWrapper()
+            wrapper.server(self.helper.ntske_server_cert,
+                           self.helper.ntske_server_key)
+            wrapper.set_alpn_protocols([NTS_ALPN_PROTO])
+            self.wrapper = wrapper
+        except Exception:
+            traceback.print_exc()
+
+        try:
+            self.helper.load_master_keys()
+        except Exception:
+            traceback.print_exc()
+
+def run_mgmt(host, port, master_keys_dir, parent_pid):
+    # Shut up flask about using test server 
+    from flask import Flask
+    cli = sys.modules['flask.cli']
+    cli.show_server_banner = lambda *x: None
+
+    import mgmt
+    mgmt.master_keys_dir = master_keys_dir
+    mgmt.parent_pid = parent_pid
+    try:
+        mgmt.application.run(host = host, port = port)
+    except KeyboardInterrupt:
+        pass
+    print("mgmt", os.getpid(), "stopping...")
 
 def main():
     config_path = 'server.ini'
@@ -275,6 +365,8 @@ def main():
 
     pids = []
 
+    print("master process", os.getpid())
+
     if 1:
         for i in range(3):
             pid = os.fork()
@@ -282,18 +374,48 @@ def main():
                 print("child process", os.getpid())
                 try:
                     try:
+                        signal.signal(signal.SIGHUP, server.sighup)
                         server.serve_forever()
                     except KeyboardInterrupt:
-                        print("keyboardinterrupt in child", os.getpid(), "...")
                         pass
                     print("child", os.getpid(), "stopping...")
                     server.server_close()
+                except:
+                    import traceback
+                    traceback.print_exc()
                 finally:
                     sys.exit(0)
             else:
                 pids.append(pid)
 
+    if server.helper.mgmt_host and server.helper.mgmt_port:
+        print("starting mgmt web server on %s:%u"% (
+            server.helper.mgmt_host,
+            server.helper.mgmt_port))
+
+        parent_pid = os.getpid()
+        pid = os.fork()
+        if pid == 0:
+            print("mgmt process", os.getpid())
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+            try:
+                run_mgmt(server.helper.mgmt_host, server.helper.mgmt_port,
+                         server.helper.master_keys_dir, parent_pid)
+            except:
+                import traceback
+                traceback.print_exc()
+            finally:
+                sys.exit(0)
+        else:
+            pids.append(pid)
+
+    def master_sighup(signalnumber, frame, server = server, pids = pids):
+        server.sighup(signalnumber, frame)
+        for pid in pids:
+            os.kill(pid, signal.SIGHUP)
+
     try:
+        signal.signal(signal.SIGHUP, master_sighup)
         server.serve_forever()
     except KeyboardInterrupt:
         print("keyboardinterrupt")
